@@ -2,48 +2,73 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use eframe::egui;
+use eframe::egui::{self, Align2, Color32, CursorIcon, FontId, RichText, Sense, Stroke};
+use std::collections::HashSet;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// ── цвета ─────────────────────────────────────────────────────────────────────
+
+const GREEN:   Color32 = Color32::from_rgb(80, 210, 80);
+const KINOVAR: Color32 = Color32::from_rgb(227, 66, 52);  // киноварь
+const PUNCH:   Color32 = Color32::from_rgb(224, 17, 95);  // пунцовый
+const BLUE:    Color32 = Color32::from_rgb(100, 180, 255);
+const RED_X:   Color32 = Color32::from_rgb(200, 70, 70);
+const PID_COL: Color32 = Color32::from_rgb(240, 0, 255);
+const CMD_COL: Color32 = Color32::from_rgb(160, 160, 200);
+const BTN_BG:  Color32 = Color32::from_gray(22);
+const YELLOW:  Color32 = Color32::from_rgb(255, 200, 0);  // избранное (залито)
+const STAR_OFF: Color32 = Color32::from_gray(120);        // избранное (обводка)
+
+const NAME_W: f32 = 120.0;
+const BTN_W:  f32 = 100.0;
+const PID_W:  f32 = 40.0;
+const TIME_W: f32 = 50.0;
+const CMD_W:  f32 = 100.0;
+
 // ── Lang ──────────────────────────────────────────────────────────────────────
 
 struct Lang {
-    // Auth
     title:            &'static str,
     sudo_prompt:      &'static str,
     sudo_placeholder: &'static str,
     unlock:           &'static str,
     enter_password:   &'static str,
     wrong_password:   &'static str,
-    // Toolbar / empty state
-    add_service:      &'static str,
-    add_hint:         &'static str,
     no_services:      &'static str,
-    // Table header
     hdr_status:       &'static str,
     hdr_service:      &'static str,
-    // Buttons
+    hdr_pid:          &'static str,
+    hdr_time:         &'static str,
+    hdr_command:      &'static str,
+    active_hdr:       &'static str,
+    inactive_hdr:     &'static str,
     btn_stop:         &'static str,
     btn_start:        &'static str,
+    btn_remove:       &'static str,
     btn_disable:      &'static str,
     btn_enable:       &'static str,
-    btn_remove:       &'static str,
-    // Hover hints
     hint_stop:        &'static str,
     hint_start:       &'static str,
-    hint_disable:     &'static str,
-    hint_enable:      &'static str,
     hint_remove:      &'static str,
-    // Add dialog
+    hint_enable:      &'static str,
+    hint_delete:      &'static str,
+    add_service:      &'static str,
+    add_hint:         &'static str,
+    hint_fav:         &'static str,
     dlg_title:        &'static str,
-    dlg_svc_name:     &'static str,
-    dlg_command:      &'static str,
+    dlg_name:         &'static str,
     dlg_add:          &'static str,
     dlg_cancel:       &'static str,
+    dlg_bad_name:     &'static str,
+    dlg_exists:       &'static str,
+    confirm_title:    &'static str,
+    confirm_unlink:   &'static str,
+    confirm_delete:   &'static str,
 }
 
 const RU: Lang = Lang {
@@ -53,26 +78,36 @@ const RU: Lang = Lang {
     unlock:           "Разблокировать",
     enter_password:   "Введите пароль",
     wrong_password:   "Неверный пароль",
-    add_service:      "+ добавить сервис",
-    add_hint:         "Создать симлинк /var/service/<name> → /etc/sv/<name>",
     no_services:      "Сервисы не найдены",
     hdr_status:       "STATUS",
     hdr_service:      "SERVICE",
+    hdr_pid:          "PID",
+    hdr_time:         "TIME",
+    hdr_command:      "COMMAND",
+    active_hdr:       "включённые сервисы (/var/service/)",
+    inactive_hdr:     "выключенные сервисы (/etc/sv/)",
     btn_stop:         "остановить",
     btn_start:        "запустить",
+    btn_remove:       "удалить",
     btn_disable:      "отключить",
     btn_enable:       "включить",
-    btn_remove:       "удалить",
     hint_stop:        "sv down — остановить сервис",
     hint_start:       "sv up — запустить сервис",
-    hint_disable:     "touch /etc/sv/<name>/down — отключить автозапуск",
-    hint_enable:      "rm /etc/sv/<name>/down — включить автозапуск",
-    hint_remove:      "rm /var/service/<name> — убрать из автозагрузки",
+    hint_remove:      "rm /var/service/<n> — убрать из /var/service (остаётся в /etc/sv)",
+    hint_enable:      "ln -s /etc/sv/<n> /var/service/<n> — включить",
+    hint_delete:      "rm -rf /etc/sv/<n> — удалить сервис полностью",
+    add_service:      "+ добавить сервис",
+    add_hint:         "Создать /etc/sv/<n>/run и открыть папку",
+    hint_fav:         "Избранное: наверх списка",
     dlg_title:        "Добавить сервис",
-    dlg_svc_name:     "Имя сервиса:",
-    dlg_command:      "Команда:",
+    dlg_name:         "Имя сервиса:",
     dlg_add:          "Добавить",
     dlg_cancel:       "Отмена",
+    dlg_bad_name:     "Допустимо: a-z, 0-9, точка, _ и -",
+    dlg_exists:       "Такой сервис уже есть в /etc/sv",
+    confirm_title:    "Подтверждение",
+    confirm_unlink:   "Отключить работающий сервис?",
+    confirm_delete:   "Удалить навсегда из /etc/sv:",
 };
 
 const EN: Lang = Lang {
@@ -82,26 +117,36 @@ const EN: Lang = Lang {
     unlock:           "Unlock",
     enter_password:   "Enter password",
     wrong_password:   "Wrong password",
-    add_service:      "+ add service",
-    add_hint:         "Create symlink /var/service/<name> → /etc/sv/<name>",
     no_services:      "No services found",
     hdr_status:       "STATUS",
     hdr_service:      "SERVICE",
+    hdr_pid:          "PID",
+    hdr_time:         "TIME",
+    hdr_command:      "COMMAND",
+    active_hdr:       "enabled services (/var/service/)",
+    inactive_hdr:     "disabled services (/etc/sv/)",
     btn_stop:         "stop",
     btn_start:        "start",
+    btn_remove:       "remove",
     btn_disable:      "disable",
     btn_enable:       "enable",
-    btn_remove:       "remove",
     hint_stop:        "sv down — stop service",
     hint_start:       "sv up — start service",
-    hint_disable:     "touch /etc/sv/<name>/down — disable autostart",
-    hint_enable:      "rm /etc/sv/<name>/down — enable autostart",
-    hint_remove:      "rm /var/service/<name> — remove from autostart",
+    hint_remove:      "rm /var/service/<n> — remove from /var/service (stays in /etc/sv)",
+    hint_enable:      "ln -s /etc/sv/<n> /var/service/<n> — enable",
+    hint_delete:      "rm -rf /etc/sv/<n> — delete service completely",
+    add_service:      "+ add service",
+    add_hint:         "Create /etc/sv/<n>/run and open the folder",
+    hint_fav:         "Favorite: pin to top",
     dlg_title:        "Add Service",
-    dlg_svc_name:     "Service name:",
-    dlg_command:      "Command:",
+    dlg_name:         "Service name:",
     dlg_add:          "Add",
     dlg_cancel:       "Cancel",
+    dlg_bad_name:     "Allowed: a-z, 0-9, dot, _ and -",
+    dlg_exists:       "This service already exists in /etc/sv",
+    confirm_title:    "Confirm",
+    confirm_unlink:   "Disable running service?",
+    confirm_delete:   "Delete permanently from /etc/sv:",
 };
 
 fn detect_lang() -> &'static Lang {
@@ -115,47 +160,38 @@ fn detect_lang() -> &'static Lang {
     &EN
 }
 
-// ── sudo helpers ──────────────────────────────────────────────────────────────
+// ── sudo / shell helpers ──────────────────────────────────────────────────────
 
 fn sudo(pw: &str, args: &[&str]) -> (bool, String) {
     let mut child = match Command::new("sudo")
         .arg("-S").args(args)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn()
-    { Ok(c) => c, Err(e) => return (false, e.to_string()) };
+    {
+        Ok(c) => c,
+        Err(e) => return (false, e.to_string()),
+    };
     if let Some(mut s) = child.stdin.take() {
         let _ = s.write_all(format!("{}\n", pw).as_bytes());
     }
     match child.wait_with_output() {
-        Ok(o) => (o.status.success(),
-                  String::from_utf8_lossy(&o.stdout).to_string()
-                + &String::from_utf8_lossy(&o.stderr).to_string()),
+        Ok(o) => (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).to_string()
+                + &String::from_utf8_lossy(&o.stderr),
+        ),
         Err(e) => (false, e.to_string()),
     }
 }
 
-fn run(args: &[&str]) -> String {
-    Command::new(args[0]).args(&args[1..])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default()
-}
-
-// ── service data ──────────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-struct Svc {
-    name:    String,
-    state:   String, // "run" | "down" | ...
-    enabled: bool,   // нет файла /etc/sv/<name>/down
-    pid:     String,
-    command: String,
-    time:    String,
+fn sudo_ok(pw: &str, args: &[&str]) -> Result<String, String> {
+    let (ok, out) = sudo(pw, args);
+    if ok { Ok(out) } else { Err(out.trim().to_string()) }
 }
 
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
+    let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             for nc in chars.by_ref() {
@@ -168,141 +204,549 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-fn load_services(pw: &str) -> Vec<Svc> {
-    let names_raw = run(&["ls", "/var/service"]);
-    let mut svcs = Vec::new();
+fn valid_name(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('.')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
 
-    for name in names_raw.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        let (_, status_raw) = sudo(pw, &["sv", "status", &format!("/var/service/{}", name)]);
-        let status = strip_ansi(&status_raw);
-        let status = status.trim();
+// ── service data ──────────────────────────────────────────────────────────────
 
-        let state = if status.starts_with("run") {
-            "run".to_string()
-        } else if status.starts_with("down") {
-            "down".to_string()
-        } else {
-            status.split(':').next().unwrap_or("?").trim().to_string()
-        };
+#[derive(Clone, Default)]
+struct Svc {
+    name:    String,
+    path:    String,   // путь, по которому вызывается sv
+    running: bool,
+    pid:     String,
+    time:    String,
+    command: String,      // укороченная версия для колонки
+    command_full: String, // полная командная строка для подсказки
+    fav:     bool,
+}
 
-        let pid = {
-            let mut p = "-".to_string();
-            if let Some(start) = status.find("(pid ") {
-                let rest = &status[start + 5..];
-                if let Some(end) = rest.find(')') {
-                    p = rest[..end].trim().to_string();
-                }
-            }
-            p
-        };
+#[derive(Clone, Default)]
+struct Data {
+    active:   Vec<Svc>, // /var/service
+    inactive: Vec<Svc>, // /etc/sv без того, что уже в /var/service
+}
 
-        let time = {
-            let mut secs_opt: Option<u64> = None;
-            for word in status.split_whitespace() {
-                let w = word.trim_end_matches(|c: char| !c.is_alphanumeric());
-                if w.ends_with('s') {
-                    let digits = &w[..w.len()-1];
-                    if digits.chars().all(|c| c.is_ascii_digit()) {
-                        secs_opt = digits.parse().ok();
-                        break;
-                    }
-                }
-            }
-            if let Some(secs) = secs_opt {
-                if secs < 60 { format!("{}s", secs) }
-                else if secs < 3600 {
-                    let m = secs / 60; let s = secs % 60;
-                    if s == 0 { format!("{}m", m) } else { format!("{}m{}s", m, s) }
-                } else if secs < 86400 {
-                    let h = secs / 3600; let m = (secs % 3600) / 60;
-                    if m == 0 { format!("{}h", h) } else { format!("{}h{}m", h, m) }
-                } else {
-                    let d = secs / 86400; let h = (secs % 86400) / 3600;
-                    if h == 0 { format!("{}d", d) } else { format!("{}d{}h", d, h) }
-                }
+fn fmt_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        let (m, s) = (secs / 60, secs % 60);
+        if s == 0 { format!("{}m", m) } else { format!("{}m{}s", m, s) }
+    } else if secs < 86400 {
+        let (h, m) = (secs / 3600, (secs % 3600) / 60);
+        if m == 0 { format!("{}h", h) } else { format!("{}h{}m", h, m) }
+    } else {
+        let (d, h) = (secs / 86400, (secs % 86400) / 3600);
+        if h == 0 { format!("{}d", d) } else { format!("{}d{}h", d, h) }
+    }
+}
+
+fn parse_status(status: &str) -> (bool, String, String) {
+    let running = status.starts_with("run");
+    let pid = status
+        .find("(pid ")
+        .and_then(|s| {
+            let rest = &status[s + 5..];
+            rest.find(')').map(|e| rest[..e].trim().to_string())
+        })
+        .unwrap_or_default();
+    let time = status
+        .split_whitespace()
+        .find_map(|w| {
+            let w = w.trim_end_matches(|c: char| !c.is_alphanumeric());
+            let d = w.strip_suffix('s')?;
+            if !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) {
+                d.parse::<u64>().ok()
             } else {
-                String::new()
+                None
             }
-        };
+        })
+        .map(fmt_secs)
+        .unwrap_or_default();
+    (running, pid, time)
+}
 
-        let command = {
-            let run_file = format!("/etc/sv/{}/run", name);
-            let out = run(&["cat", &run_file]);
-            out.lines()
-                .rev()
-                .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-                .map(|l| {
-                    l.split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("")
-                        .to_string()
-                })
+/// Имя процесса для COMMAND, как в vsv: только arg0 из /proc/<pid>/cmdline.
+/// Для остановленных сервисов — пусто.
+fn cmd_from_pid(pid: &str) -> String {
+    std::fs::read(format!("/proc/{}/cmdline", pid))
+        .map(|raw| {
+            raw.split(|b| *b == 0)
+                .next()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
                 .unwrap_or_default()
-        };
+        })
+        .unwrap_or_default()
+}
 
-        let down_file = format!("/etc/sv/{}/down", name);
-        let enabled = !std::path::Path::new(&down_file).exists();
+fn list_dir(dir: &str) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| !n.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
-        svcs.push(Svc { name: name.to_string(), state, enabled, pid, command, time });
+fn make_svc(pw: &str, dir: &str, name: &str) -> Svc {
+    let path = format!("{}/{}", dir, name);
+    let (_, raw) = sudo(pw, &["sv", "status", &path]);
+    let (running, pid, time) = parse_status(strip_ansi(&raw).trim());
+    let command_full = if running { cmd_from_pid(&pid) } else { String::new() };
+    let mut command = command_full.clone();
+    // больше 17 символов: первые 14 и «...», итого 17
+    if command.chars().count() > 17 {
+        command = command.chars().take(14).collect::<String>() + "...";
+    }
+    Svc {
+        name: name.to_string(),
+        path,
+        running,
+        pid,
+        time,
+        command,
+        command_full,
+        fav: false, // проставляется в load()
+    }
+}
+
+fn fav_file() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".local/sv")
+}
+
+fn load_favs() -> HashSet<String> {
+    std::fs::read_to_string(fav_file())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn save_favs(favs: &HashSet<String>) -> Result<(), String> {
+    let path = fav_file();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let mut names: Vec<&String> = favs.iter().collect();
+    names.sort();
+    let text: String = names.iter().map(|n| format!("{}\n", n)).collect();
+    std::fs::write(&path, text).map_err(|e| e.to_string())
+}
+
+fn load(pw: &str) -> Data {
+    let mut active_names = list_dir("/var/service");
+    active_names.sort();
+    let active_set: HashSet<&str> = active_names.iter().map(|s| s.as_str()).collect();
+
+    let mut inactive_names: Vec<String> = list_dir("/etc/sv")
+        .into_iter()
+        .filter(|n| !active_set.contains(n.as_str()) && Path::new("/etc/sv").join(n).is_dir())
+        .collect();
+    inactive_names.sort();
+
+    let favs = load_favs();
+    let mut active: Vec<Svc> = active_names.iter().map(|n| make_svc(pw, "/var/service", n)).collect();
+    let mut inactive: Vec<Svc> = inactive_names.iter().map(|n| make_svc(pw, "/etc/sv", n)).collect();
+    for s in active.iter_mut().chain(inactive.iter_mut()) {
+        s.fav = favs.contains(&s.name);
+    }
+    // избранное сверху своей половины, внутри — по алфавиту
+    let key = |s: &Svc| (!s.fav, s.name.clone());
+    active.sort_by_key(key);
+    inactive.sort_by_key(key);
+    Data { active, inactive }
+}
+
+// ── fonts & theme ─────────────────────────────────────────────────────────────
+
+fn setup_fonts_and_theme(cc: &eframe::CreationContext<'_>) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "terminus".into(),
+        egui::FontData::from_static(include_bytes!("../assets/Terminus__TTF__500.ttf")),
+    );
+    fonts.font_data.insert(
+        "terminus_bold".into(),
+        egui::FontData::from_static(include_bytes!("../assets/Terminus__TTF__Bold_700.ttf")),
+    );
+    fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "terminus".into());
+    fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "terminus".into());
+    cc.egui_ctx.set_fonts(fonts);
+
+    let mut visuals = egui::Visuals::dark();
+    let black  = Color32::BLACK;
+    let white  = Color32::WHITE;
+    let gray05 = Color32::from_gray(12);
+    let gray10 = Color32::from_gray(22);
+    let gray20 = Color32::from_gray(45);
+
+    visuals.override_text_color = Some(white);
+    visuals.panel_fill          = black;
+    visuals.window_fill         = black;
+    visuals.extreme_bg_color    = black;
+    visuals.faint_bg_color      = gray05;
+
+    for w in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        w.bg_fill      = gray10;
+        w.weak_bg_fill = gray05;
+        w.fg_stroke    = Stroke::new(1.0_f32, white);
+        w.bg_stroke    = Stroke::new(1.0_f32, gray20);
+    }
+    visuals.widgets.hovered.bg_fill   = gray20;
+    visuals.widgets.active.bg_fill    = gray20;
+    visuals.widgets.hovered.expansion = 0.0;
+    visuals.widgets.active.expansion  = 0.0;
+    visuals.selection.bg_fill = Color32::from_rgb(0, 80, 160);
+    visuals.selection.stroke  = Stroke::new(1.0_f32, white);
+    visuals.striped = true;
+
+    cc.egui_ctx.set_visuals(visuals);
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+
+const ROW_H:  f32 = 28.0;
+const BTN_H:  f32 = 26.0;
+const GAP:    f32 = 8.0;
+
+/// Фиксированная раскладка колонок. Одна и та же для шапки и всех строк.
+/// Кнопка «удалить» прижата к правому краю, колонки PID/TIME/COMMAND левее неё.
+struct Cols {
+    name_x: f32,
+    act_x:  f32, // первая кнопка: запустить/остановить или включить
+    pid_x:  f32,
+    time_x: f32,
+    cmd_x:  f32,
+    del_x:  f32, // удалить, у правого края
+}
+
+fn cols(left: f32, right: f32) -> Cols {
+    let del_x  = right - 6.0 - BTN_W;
+    let time_x = del_x - 16.0 - TIME_W;
+    let cmd_x  = time_x - GAP - CMD_W;
+    let pid_x  = cmd_x - GAP - PID_W;
+    let name_x = left + 64.0; // после звезды и STATUS
+    let act_x  = name_x + NAME_W + GAP;
+    Cols { name_x, act_x, pid_x, time_x, cmd_x, del_x }
+}
+
+/// Кнопка в стиле приложения: серый фон, цветной текст; при наведении/выборе заливается цветом.
+fn btn_at(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    salt: (&str, &str),
+    label: &str,
+    color: Color32,
+    hint: &str,
+    selected: bool,
+) -> bool {
+    let resp = ui.interact(rect, ui.id().with(salt), Sense::click());
+    let hovered = resp.hovered() || selected;
+    let (fill, text) = if hovered { (color, Color32::BLACK) } else { (BTN_BG, color) };
+    let p = ui.painter();
+    p.rect(rect, 2.0_f32, fill, Stroke::new(1.0_f32, color));
+    p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(13.0), text);
+    if selected {
+        p.rect_stroke(rect.expand(2.0_f32), 2.0_f32, Stroke::new(1.5_f32, color));
+    }
+    resp.on_hover_text(hint).clicked()
+}
+
+fn status_icon(p: &egui::Painter, c: egui::Pos2, running: bool) {
+    let color = if running { GREEN } else { RED_X };
+    let s = Stroke::new(2.0_f32, color);
+    if running {
+        p.line_segment([egui::pos2(c.x - 5.0, c.y + 1.0), egui::pos2(c.x - 1.0, c.y + 5.0)], s);
+        p.line_segment([egui::pos2(c.x - 1.0, c.y + 5.0), egui::pos2(c.x + 6.0, c.y - 4.0)], s);
+    } else {
+        p.line_segment([egui::pos2(c.x - 4.0, c.y - 4.0), egui::pos2(c.x + 4.0, c.y + 4.0)], s);
+        p.line_segment([egui::pos2(c.x + 4.0, c.y - 4.0), egui::pos2(c.x - 4.0, c.y + 4.0)], s);
+    }
+}
+
+/// Звезда «избранное»: залитая жёлтая или серая обводка.
+fn draw_star(p: &egui::Painter, c: egui::Pos2, filled: bool) {
+    let mut pts = Vec::with_capacity(10);
+    for i in 0..10 {
+        let r = if i % 2 == 0 { 7.0_f32 } else { 3.0_f32 };
+        let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+        pts.push(egui::pos2(c.x + r * a.cos(), c.y + r * a.sin()));
+    }
+    let shape = if filled {
+        egui::epaint::PathShape {
+            points: pts,
+            closed: true,
+            fill: YELLOW,
+            stroke: Stroke::new(1.0_f32, YELLOW).into(),
+        }
+    } else {
+        egui::epaint::PathShape {
+            points: pts,
+            closed: true,
+            fill: Color32::TRANSPARENT,
+            stroke: Stroke::new(1.5_f32, STAR_OFF).into(),
+        }
+    };
+    p.add(egui::Shape::Path(shape));
+}
+
+/// Жёлтая обводка вокруг звезды (подсветка выбора стрелками).
+fn draw_star_outline(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let mut pts = Vec::with_capacity(11);
+    for i in 0..10 {
+        let r = if i % 2 == 0 { 11.0_f32 } else { 5.5_f32 };
+        let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+        pts.push(egui::pos2(c.x + r * a.cos(), c.y + r * a.sin()));
+    }
+    p.add(egui::Shape::closed_line(pts, Stroke::new(1.5_f32, color)));
+}
+
+fn header_row(ui: &mut egui::Ui, l: &Lang) {
+    let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), Sense::hover());
+    let c = cols(row.left(), row.right());
+    let cy = row.center().y;
+    let p = ui.painter();
+    let f = FontId::monospace(11.0);
+    let g = Color32::WHITE;
+    p.text(egui::pos2(row.left() + 14.0, cy), Align2::LEFT_CENTER, l.hdr_status, f.clone(), g);
+    p.text(egui::pos2(c.name_x, cy), Align2::LEFT_CENTER, l.hdr_service, f.clone(), g);
+    p.text(egui::pos2(c.pid_x, cy), Align2::LEFT_CENTER, l.hdr_pid, f.clone(), g);
+    p.text(egui::pos2(c.time_x, cy), Align2::LEFT_CENTER, l.hdr_time, f.clone(), g);
+    p.text(egui::pos2(c.cmd_x, cy), Align2::LEFT_CENTER, l.hdr_command, f, g);
+}
+
+/// Одна строка сервиса. `sel` — выбранная клавиатурой колонка кнопки (если строка выбрана).
+fn draw_row(
+    ui: &mut egui::Ui,
+    l: &Lang,
+    s: &Svc,
+    inactive: bool,
+    busy: bool,
+    sel: Option<usize>,
+    scroll: bool,
+    out: &mut Option<Action>,
+) {
+    let (row, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::hover());
+    if scroll && sel.is_some() {
+        resp.scroll_to_me(None);
+    }
+    let c = cols(row.left(), row.right());
+    let cy = row.center().y;
+    let is_sel = |i: usize| sel == Some(i);
+    let act_rect = |x: f32| {
+        egui::Rect::from_min_size(egui::pos2(x, cy - BTN_H / 2.0), egui::vec2(BTN_W, BTN_H))
+    };
+
+    // звезда слева от статуса
+    let star_c = egui::pos2(row.left() + 12.0, cy);
+    draw_star(ui.painter(), star_c, s.fav);
+    let star_rect = egui::Rect::from_center_size(star_c, egui::vec2(18.0, 18.0));
+    if is_sel(0) {
+        draw_star_outline(ui.painter(), star_c, YELLOW);
+    }
+    if !busy {
+        let r = ui.interact(star_rect, ui.id().with((&s.name, "fav")), Sense::click());
+        if r.on_hover_text(l.hint_fav).clicked() {
+            *out = Some(Action::Favorite(s.name.clone()));
+        }
     }
 
-    svcs.sort_by(|a, b| a.name.cmp(&b.name));
-    svcs
+    status_icon(ui.painter(), egui::pos2(row.left() + 36.0, cy), s.running);
+    ui.painter().text(
+        egui::pos2(c.name_x, cy), Align2::LEFT_CENTER, &s.name,
+        FontId::monospace(13.0), Color32::WHITE,
+    );
+
+    if busy {
+        ui.put(
+            egui::Rect::from_min_size(egui::pos2(c.act_x, cy - 8.0), egui::vec2(16.0, 16.0)),
+            egui::Spinner::new(),
+        );
+        return;
+    }
+
+    if inactive {
+        if btn_at(ui, act_rect(c.act_x), (&s.name, "enable"), l.btn_enable, BLUE, l.hint_enable, is_sel(1)) {
+            *out = Some(Action::Link(s.name.clone()));
+        }
+        if btn_at(ui, act_rect(c.del_x), (&s.name, "delete"), l.btn_remove, PUNCH, l.hint_delete, is_sel(2)) {
+            *out = Some(Action::Delete(s.name.clone()));
+        }
+    } else {
+        let (label, color, hint) = if s.running {
+            (l.btn_stop, KINOVAR, l.hint_stop)
+        } else {
+            (l.btn_start, GREEN, l.hint_start)
+        };
+        if btn_at(ui, act_rect(c.act_x), (&s.name, "toggle"), label, color, hint, is_sel(1)) {
+            *out = Some(Action::Toggle {
+                name: s.name.clone(),
+                path: s.path.clone(),
+                running: s.running,
+            });
+        }
+        if btn_at(ui, act_rect(c.del_x), (&s.name, "unlink"), l.btn_disable, PUNCH, l.hint_remove, is_sel(2)) {
+            *out = Some(Action::Unlink(s.name.clone()));
+        }
+    }
+
+    if !s.command_full.is_empty() {
+        let cmd_rect = egui::Rect::from_min_size(
+            egui::pos2(c.cmd_x, cy - ROW_H / 2.0), egui::vec2(CMD_W, ROW_H));
+        ui.interact(cmd_rect, ui.id().with((&s.name, "cmd")), Sense::hover())
+            .on_hover_text(&s.command_full);
+    }
+
+    let p = ui.painter();
+    if !inactive {
+        p.text(egui::pos2(c.pid_x, cy), Align2::LEFT_CENTER, &s.pid,
+            FontId::monospace(12.0), PID_COL);
+        p.text(egui::pos2(c.time_x, cy), Align2::LEFT_CENTER, &s.time,
+            FontId::monospace(12.0), Color32::GRAY);
+    }
+    p.text(egui::pos2(c.cmd_x, cy), Align2::LEFT_CENTER, &s.command,
+        FontId::monospace(12.0), CMD_COL);
+}
+
+// ── actions ───────────────────────────────────────────────────────────────────
+
+enum Action {
+    Toggle { name: String, path: String, running: bool }, // sv up / sv down
+    Unlink(String), // rm /var/service/<n>
+    Link(String),   // ln -s /etc/sv/<n> /var/service/<n>
+    Delete(String), // rm -rf /etc/sv/<n>
+    Add(String),    // создать /etc/sv/<n>/run и открыть папку
+    Favorite(String), // переключить избранное (~/.local/sv)
+}
+
+impl Action {
+    fn name(&self) -> &str {
+        match self {
+            Action::Toggle { name, .. } => name.as_str(),
+            Action::Unlink(n) | Action::Link(n) | Action::Delete(n) | Action::Add(n)
+            | Action::Favorite(n) => n.as_str(),
+        }
+    }
+}
+
+fn add_service(pw: &str, name: &str) -> Result<(), String> {
+    let dir = format!("/etc/sv/{}", name);
+    let script = format!(
+        "mkdir -p '{d}' && printf '%s\\n' '#!/bin/sh' 'exec 2>&1' '' > '{d}/run' && chmod 755 '{d}/run'",
+        d = dir
+    );
+    sudo_ok(pw, &["sh", "-c", &script])?;
+    // файловый менеджер по умолчанию, от имени пользователя
+    let _ = Command::new("xdg-open").arg(&dir).spawn();
+    Ok(())
+}
+
+/// Действие для строки (row) из списка, с учётом того, что сверху идут активные.
+fn row_action(data: &Data, row: usize, col: usize) -> Option<Action> {
+    let na = data.active.len();
+    if row < na {
+        let s = &data.active[row];
+        return match col {
+            0 => Some(Action::Favorite(s.name.clone())),
+            1 => Some(Action::Toggle { name: s.name.clone(), path: s.path.clone(), running: s.running }),
+            2 => Some(Action::Unlink(s.name.clone())),
+            _ => None,
+        };
+    }
+    if row == na {
+        return None; // заголовок /etc/sv
+    }
+    let i = row - na - 1;
+    let s = data.inactive.get(i)?;
+    match col {
+        0 => Some(Action::Favorite(s.name.clone())),
+        1 => Some(Action::Link(s.name.clone())),
+        2 => Some(Action::Delete(s.name.clone())),
+        _ => None,
+    }
+}
+
+fn row_cols(na: usize, row: usize) -> usize {
+    if row == na { 1 } else { 3 } // заголовок /etc/sv: один «столбец»; строки: звезда, кнопка, удалить
 }
 
 // ── app ───────────────────────────────────────────────────────────────────────
-
-enum Action {
-    Start(String),
-    Stop(String),
-    Enable(String),
-    Disable(String),
-    Remove(String),
-    Add(String, String), // src, dst (full paths)
-}
-
-struct AddDialog {
-    svc_name:    String,
-    src_line:    String,
-    dst_line:    String,
-    src_edited:  bool,
-    dst_edited:  bool,
-    just_opened: bool, // фокус на имя только при первом показе
-}
 
 #[derive(PartialEq)]
 enum Screen { Auth, Main }
 
 struct App {
-    lang:      &'static Lang,
-    screen:    Screen,
-    svcs:      Arc<Mutex<Vec<Svc>>>,
-    loading:   Arc<Mutex<bool>>,
-    busy:      Arc<Mutex<std::collections::HashSet<String>>>,
-    last_load: Instant,
+    lang:         &'static Lang,
+    screen:       Screen,
+    data:         Arc<Mutex<Data>>,
+    loading:      Arc<Mutex<bool>>,
+    busy:         Arc<Mutex<HashSet<String>>>,
+    msg:          Arc<Mutex<Option<String>>>,
+    last_load:    Instant,
 
     password:     String,
     sudo_error:   Option<String>,
-    auth_pending: Arc<Mutex<Option<bool>>>, // результат проверки пароля
-    add_dlg:      Option<AddDialog>,
+    checking:     bool,
+    auth_pending: Arc<Mutex<Option<bool>>>,
+
+    expanded:     bool,            // раскрыт ли список /etc/sv
+    dlg:          Option<String>,  // Some = диалог «добавить» открыт, внутри имя
+    dlg_err:      Option<String>,
+    dlg_first:    bool,
+    dlg_sel:      usize, // фокус в диалоге: 0 — поле, 1 — «Добавить», 2 — «Отмена»
+    confirm:      Option<Action>, // опасное действие, ждёт подтверждения
+    confirm_sel:  usize,          // 0 — «Отмена» (по умолчанию), 1 — «Удалить»
+
+    kb_row:       usize,
+    kb_col:       usize,
+    kb_active:    bool, // подсветка появляется только после первой стрелки
+    kb_moved:     bool, // курсор сдвинулся стрелкой в этом кадре: прокрутить к нему
 }
 
 impl App {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_fonts_and_theme(cc);
         Self {
             lang:         detect_lang(),
             screen:       Screen::Auth,
-            svcs:         Arc::new(Mutex::new(Vec::new())),
+            data:         Arc::new(Mutex::new(Data::default())),
             loading:      Arc::new(Mutex::new(false)),
-            busy:         Arc::new(Mutex::new(std::collections::HashSet::new())),
+            busy:         Arc::new(Mutex::new(HashSet::new())),
+            msg:          Arc::new(Mutex::new(None)),
             last_load:    Instant::now() - Duration::from_secs(999),
             password:     String::new(),
             sudo_error:   None,
+            checking:     false,
             auth_pending: Arc::new(Mutex::new(None)),
-            add_dlg:      None,
+            expanded:     false,
+            dlg:          None,
+            dlg_err:      None,
+            dlg_first:    false,
+            dlg_sel:      0,
+            confirm:      None,
+            confirm_sel:  0,
+            kb_row:       0,
+            kb_col:       0,
+            kb_active:    false,
+            kb_moved:     false,
         }
     }
 
@@ -313,59 +757,78 @@ impl App {
             *l = true;
         }
         self.last_load = Instant::now();
-        let svcs    = Arc::clone(&self.svcs);
+        let data    = Arc::clone(&self.data);
         let loading = Arc::clone(&self.loading);
         let pw      = self.password.clone();
         thread::spawn(move || {
-            *svcs.lock().unwrap()    = load_services(&pw);
+            let d = load(&pw);
+            *data.lock().unwrap()    = d;
             *loading.lock().unwrap() = false;
         });
     }
 
-    fn dispatch(&mut self, action: Action) {
-        let pw    = self.password.clone();
-        let busy  = Arc::clone(&self.busy);
-        let svcs  = Arc::clone(&self.svcs);
-        let loading = Arc::clone(&self.loading);
-
-        thread::spawn(move || {
-            let name = match &action {
-                Action::Start(n)|Action::Stop(n)|Action::Enable(n)
-                |Action::Disable(n)|Action::Remove(n) => n.clone(),
-                Action::Add(_, dst) => dst.clone(),
-            };
-            busy.lock().unwrap().insert(name.clone());
-
-            match action {
-                Action::Start(n)   => { sudo(&pw, &["sv", "up",   &n]); }
-                Action::Stop(n)    => { sudo(&pw, &["sv", "down", &n]); }
-                Action::Enable(n)  => {
-                    let path = format!("/etc/sv/{}/down", n);
-                    sudo(&pw, &["rm", "-f", &path]);
-                }
-                Action::Disable(n) => {
-                    let path = format!("/etc/sv/{}/down", n);
-                    sudo(&pw, &["touch", &path]);
-                }
-                Action::Remove(n)  => {
-                    let path = format!("/var/service/{}", n);
-                    sudo(&pw, &["rm", "-f", &path]);
-                }
-                Action::Add(src, dst) => {
-                    sudo(&pw, &["ln", "-s", &src, &dst]);
+    /// Мгновенное переключение избранного: звезда и порядок меняются сразу,
+    /// запись в ~/.local/sv идёт в фоне.
+    fn toggle_favorite_now(&self, name: &str) {
+        {
+            let mut guard = self.data.lock().unwrap();
+            let data = &mut *guard;
+            for s in data.active.iter_mut().chain(data.inactive.iter_mut()) {
+                if s.name == name {
+                    s.fav = !s.fav;
                 }
             }
-
-            busy.lock().unwrap().remove(&name);
-            // перезагружаем список
-            *loading.lock().unwrap() = true;
-            *svcs.lock().unwrap() = load_services(&pw);
-            *loading.lock().unwrap() = false;
+            let key = |s: &Svc| (!s.fav, s.name.clone());
+            data.active.sort_by_key(key);
+            data.inactive.sort_by_key(key);
+        }
+        let name = name.to_string();
+        thread::spawn(move || {
+            let mut favs = load_favs();
+            if !favs.remove(&name) {
+                favs.insert(name);
+            }
+            let _ = save_favs(&favs);
         });
     }
 
-    fn request(&mut self, action: Action) {
-        self.dispatch(action);
+    fn dispatch(&self, action: Action) {
+        let pw      = self.password.clone();
+        let busy    = Arc::clone(&self.busy);
+        let data    = Arc::clone(&self.data);
+        let loading = Arc::clone(&self.loading);
+        let msg     = Arc::clone(&self.msg);
+
+        thread::spawn(move || {
+            let key = action.name().to_string();
+            busy.lock().unwrap().insert(key.clone());
+
+            let res: Result<(), String> = match action {
+                Action::Toggle { path, running, .. } => {
+                    sudo_ok(&pw, &["sv", if running { "down" } else { "up" }, &path]).map(|_| ())
+                }
+                Action::Unlink(n) => sudo_ok(&pw, &["rm", "-f", &format!("/var/service/{}", n)]).map(|_| ()),
+                Action::Link(n)   => sudo_ok(&pw, &[
+                    "ln", "-s", &format!("/etc/sv/{}", n), &format!("/var/service/{}", n),
+                ]).map(|_| ()),
+                Action::Delete(n) => sudo_ok(&pw, &["rm", "-rf", &format!("/etc/sv/{}", n)]).map(|_| ()),
+                Action::Add(n)    => add_service(&pw, &n),
+                Action::Favorite(n) => {
+                    let mut favs = load_favs();
+                    if !favs.remove(&n) {
+                        favs.insert(n);
+                    }
+                    save_favs(&favs)
+                }
+            };
+            *msg.lock().unwrap() = res.err();
+
+            busy.lock().unwrap().remove(&key);
+            *loading.lock().unwrap() = true;
+            let d = load(&pw);
+            *data.lock().unwrap()    = d;
+            *loading.lock().unwrap() = false;
+        });
     }
 }
 
@@ -376,10 +839,10 @@ impl eframe::App for App {
 
         // ── Экран авторизации ─────────────────────────────────────────────────
         if self.screen == Screen::Auth {
-            // Проверяем результат фонового потока
-            let auth_result = *self.auth_pending.lock().unwrap();
-            if let Some(ok) = auth_result {
+            let res = *self.auth_pending.lock().unwrap();
+            if let Some(ok) = res {
                 *self.auth_pending.lock().unwrap() = None;
+                self.checking = false;
                 if ok {
                     self.screen = Screen::Main;
                     self.sudo_error = None;
@@ -390,37 +853,40 @@ impl eframe::App for App {
                 }
             }
 
+            let checking = self.checking;
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add_space(80.0);
                 ui.vertical_centered(|ui| {
-                    ui.heading(egui::RichText::new(l.title).size(22.0));
+                    ui.heading(RichText::new(l.title).size(22.0));
                     ui.add_space(24.0);
-                    ui.label(l.sudo_prompt);
+                    ui.label(RichText::new(l.sudo_prompt).size(14.0).family(egui::FontFamily::Monospace));
                     ui.add_space(8.0);
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.password)
                             .password(true)
                             .hint_text(l.sudo_placeholder)
+                            .font(egui::TextStyle::Monospace)
                             .desired_width(260.0),
                     );
                     resp.request_focus();
                     if let Some(ref err) = self.sudo_error {
                         ui.add_space(6.0);
-                        ui.colored_label(egui::Color32::from_rgb(220, 60, 60), err.as_str());
+                        ui.colored_label(RED_X,
+                            RichText::new(err.as_str()).size(13.0).family(egui::FontFamily::Monospace));
                     }
                     ui.add_space(14.0);
-                    let is_checking = self.auth_pending.lock().unwrap().is_none()
-                        && self.sudo_error.as_deref() == Some("");
                     let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                     let btn = ui.add_enabled(
-                        !is_checking,
-                        egui::Button::new(l.unlock).min_size(egui::vec2(100.0, 28.0)),
+                        !checking,
+                        egui::Button::new(RichText::new(l.unlock).size(13.0).family(egui::FontFamily::Monospace))
+                            .min_size(egui::vec2(100.0, 28.0)),
                     );
-                    if btn.clicked() || enter {
+                    if (btn.clicked() || enter) && !checking {
                         if self.password.is_empty() {
                             self.sudo_error = Some(l.enter_password.into());
                         } else {
-                            self.sudo_error = Some(" ".into());
+                            self.checking = true;
+                            self.sudo_error = None;
                             let pw2 = self.password.clone();
                             let res = Arc::clone(&self.auth_pending);
                             thread::spawn(move || {
@@ -434,339 +900,369 @@ impl eframe::App for App {
             return;
         }
 
-        // Автообновление каждые 5с
-        if self.last_load.elapsed() > Duration::from_secs(5)
-            && !*self.loading.lock().unwrap()
-        {
+        // ── автообновление каждые 5с ──────────────────────────────────────────
+        if self.last_load.elapsed() > Duration::from_secs(5) && !*self.loading.lock().unwrap() {
             self.reload();
         }
 
-        // ── add service dialog ────────────────────────────────────────────────
-        let mut do_add: Option<(String, String)> = None;
-        let mut close_add = false;
-        if let Some(ref mut dlg) = self.add_dlg {
-            let mut svc_name    = dlg.svc_name.clone();
-            let mut src_line    = dlg.src_line.clone();
-            let mut dst_line    = dlg.dst_line.clone();
-            let mut src_edited  = dlg.src_edited;
-            let mut dst_edited  = dlg.dst_edited;
-            let mut just_opened = dlg.just_opened;
+        let data = self.data.lock().unwrap().clone();
+        let busy = self.busy.lock().unwrap().clone();
+        let na = data.active.len();
+        let ni = data.inactive.len();
+        // строки: активные, заголовок /etc/sv (индекс na), [выключенные, «добавить»]
+        let total = if na == 0 && ni == 0 {
+            0
+        } else {
+            na + 1 + if self.expanded { ni + 1 } else { 0 }
+        };
+        if total == 0 {
+            self.kb_row = 0;
+        } else if self.kb_row >= total {
+            self.kb_row = total - 1;
+        }
+
+        let mut pending: Option<Action> = None;
+        let mut open_dlg = false;
+
+        // ── клавиатура (когда диалог закрыт) ──────────────────────────────────
+        if self.dlg.is_none() && self.confirm.is_none() && total > 0 {
+            let (up, down, left, right, enter, q) = ctx.input(|i| (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Q)
+                    || i.events.iter().any(|e| matches!(e,
+                        egui::Event::Text(t) if t == "й" || t == "Й")),
+            ));
+            if q {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            let arrow = up || down || left || right;
+            if arrow && !self.kb_active {
+                // первая стрелка: только включаем подсветку, курсор в начало
+                self.kb_active = true;
+                self.kb_row = 0;
+                self.kb_col = 0;
+            } else if self.kb_active {
+                if down && self.kb_row + 1 < total {
+                    self.kb_row += 1;
+                }
+                if up && self.kb_row > 0 {
+                    self.kb_row -= 1;
+                }
+                let cols = if self.expanded && self.kb_row == total - 1 { 1 } else { row_cols(na, self.kb_row) };
+                if left  && self.kb_col > 0 { self.kb_col -= 1; }
+                if right && self.kb_col + 1 < cols { self.kb_col += 1; }
+                if self.kb_col >= cols { self.kb_col = cols - 1; }
+            }
+
+            if arrow {
+                self.kb_moved = true;
+            }
+
+            if enter && self.kb_active {
+                if self.kb_row == na {
+                    // заголовок /etc/sv: раскрыть/свернуть
+                    self.expanded = !self.expanded;
+                } else if self.expanded && self.kb_row == total - 1 {
+                    open_dlg = true;
+                } else if let Some(a) = row_action(&data, self.kb_row, self.kb_col) {
+                    if !busy.contains(a.name()) {
+                        pending = Some(a);
+                    }
+                }
+            }
+        }
+
+        // ── диалог «добавить сервис» ──────────────────────────────────────────
+        if open_dlg {
+            self.dlg = Some(String::new());
+            self.dlg_err = None;
+            self.dlg_first = true;
+            self.dlg_sel = 0;
+        }
+        if let Some(mut name) = self.dlg.take() {
+            let first = self.dlg_first;
+            let mut submit = false;
+            let mut close = false;
             let mut open = true;
+            let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let esc   = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            let valid = valid_name(&name);
+            let err = self.dlg_err.clone();
+
+            // Стрелки перехватываем до того, как их заберёт поле ввода.
+            let te_id = egui::Id::new("dlg_name_field");
+            let mut sel = self.dlg_sel;
+            let (kd, ku, kl, kr) = ctx.input_mut(|i| (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                sel != 0 && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+                sel != 0 && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+            ));
+            if kd && sel == 0 { sel = 1; }          // поле → «Добавить»
+            if ku && sel != 0 { sel = 0; }          // кнопки → поле
+            if kl && sel == 2 { sel = 1; }          // «Отмена» → «Добавить»
+            if kr && sel == 1 { sel = 2; }          // «Добавить» → «Отмена»
+            if sel != 0 {
+                // уводим фокус с поля, чтобы буквы не печатались в него
+                ctx.memory_mut(|m| m.surrender_focus(te_id));
+            }
+            let mut clicked_add = false;
+            let mut clicked_cancel = false;
+
             egui::Window::new(l.dlg_title)
-                .collapsible(false).resizable(false)
-                .default_width(440.0)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .collapsible(false)
+                .resizable(false)
+                .default_width(360.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    // ── поле имени сервиса ────────────────────────────────────
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(l.dlg_svc_name).size(13.0));
-                        ui.add_space(4.0);
-                        let name_resp = ui.add(
-                            egui::TextEdit::singleline(&mut svc_name)
-                                .desired_width(180.0)
+                        ui.label(RichText::new(l.dlg_name).size(13.0));
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut name)
+                                .desired_width(200.0)
                                 .hint_text("myservice")
-                                .font(egui::TextStyle::Monospace),
+                                .font(egui::TextStyle::Monospace)
+                                .id(te_id),
                         );
-                        if just_opened { name_resp.request_focus(); just_opened = false; }
+                        if first || sel == 0 { r.request_focus(); }
                     });
-
-                    // автодублирование имени в строки если они не редактировались вручную
-                    if svc_name != dlg.svc_name {
-                        if !src_edited {
-                            let base = src_line.rfind('/').map(|i| &src_line[..=i]).unwrap_or("/etc/sv/");
-                            src_line = format!("{}{}", base, svc_name);
-                        }
-                        if !dst_edited {
-                            let base = dst_line.rfind('/').map(|i| &dst_line[..=i]).unwrap_or("/var/service/");
-                            dst_line = format!("{}{}", base, svc_name);
-                        }
+                    if !name.is_empty() && !valid {
+                        ui.colored_label(RED_X, RichText::new(l.dlg_bad_name).size(12.0));
                     }
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-
-                    ui.label(egui::RichText::new(l.dlg_command).size(12.0).color(egui::Color32::GRAY));
-                    ui.add_space(4.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("ln -s").monospace().size(13.0)
-                            .color(egui::Color32::from_rgb(180,180,180)));
-                        ui.add_space(4.0);
-                        let src_resp = ui.add(
-                            egui::TextEdit::singleline(&mut src_line)
-                                .desired_width(260.0)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if src_resp.changed() { src_edited = true; }
-                        ui.label(egui::RichText::new("\\").monospace().size(13.0)
-                            .color(egui::Color32::from_rgb(180,180,180)));
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("      ").monospace().size(13.0));
-                        ui.add_space(4.0);
-                        let dst_resp = ui.add(
-                            egui::TextEdit::singleline(&mut dst_line)
-                                .desired_width(260.0)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if dst_resp.changed() { dst_edited = true; }
-                    });
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let ok_btn = ui.add_enabled(
-                            !svc_name.trim().is_empty(),
-                            egui::Button::new(l.dlg_add),
-                        );
-                        if (ok_btn.clicked() || enter) && !svc_name.trim().is_empty() {
-                            do_add = Some((src_line.clone(), dst_line.clone()));
-                        }
-                        if ui.button(l.dlg_cancel).clicked() {
-                            close_add = true;
-                        }
-                    });
-                });
-
-            dlg.svc_name    = svc_name;
-            dlg.src_line    = src_line;
-            dlg.dst_line    = dst_line;
-            dlg.src_edited  = src_edited;
-            dlg.dst_edited  = dst_edited;
-            dlg.just_opened = just_opened;
-            if !open { close_add = true; }
-        }
-        if close_add { self.add_dlg = None; }
-
-        if let Some((src, dst)) = do_add {
-            self.add_dlg = None;
-            self.request(Action::Add(src, dst));
-        }
-
-        // ── toolbar ───────────────────────────────────────────────────────────
-        egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                let add_btn = egui::Button::new(
-                    egui::RichText::new(l.add_service).size(13.0)
-                        .color(egui::Color32::from_rgb(80,210,80))
-                )
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80,210,80)));
-
-                if ui.add(add_btn).on_hover_text(l.add_hint)
-                    .clicked()
-                {
-                    self.add_dlg = Some(AddDialog {
-                        svc_name:    String::new(),
-                        src_line:    "/etc/sv/".into(),
-                        dst_line:    "/var/service/".into(),
-                        src_edited:  false,
-                        dst_edited:  false,
-                        just_opened: true,
-                    });
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(e) = &err {
+                        ui.colored_label(RED_X, RichText::new(e.as_str()).size(12.0));
+                    }
                     ui.add_space(8.0);
-                    if *self.loading.lock().unwrap() {
-                        ui.spinner();
-                    }
+                    ui.horizontal(|ui| {
+                        let add_resp = ui.add_enabled(valid, egui::Button::new(RichText::new(l.dlg_add).size(13.0)
+                            .color(GREEN)));
+                        if sel == 1 {
+                            ui.painter().rect_stroke(add_resp.rect.expand(2.0_f32), 3.0_f32, Stroke::new(1.5_f32, YELLOW));
+                        }
+                        if add_resp.clicked() { clicked_add = true; }
+                        let cancel_resp = ui.button(RichText::new(l.dlg_cancel).size(13.0));
+                        if sel == 2 {
+                            ui.painter().rect_stroke(cancel_resp.rect.expand(2.0_f32), 3.0_f32, Stroke::new(1.5_f32, YELLOW));
+                        }
+                        if cancel_resp.clicked() { clicked_cancel = true; }
+                    });
                 });
-            });
-            ui.add_space(4.0);
-        });
 
-        // ── main list ─────────────────────────────────────────────────────────
+            if clicked_add || (enter && sel != 2 && valid) { submit = true; }
+            if clicked_cancel || (enter && sel == 2) { close = true; }
+            self.dlg_sel = sel;
+
+            self.dlg_first = false;
+            if submit {
+                if Path::new("/etc/sv").join(&name).exists() {
+                    self.dlg_err = Some(l.dlg_exists.into());
+                    self.dlg = Some(name);
+                } else {
+                    self.dlg_err = None;
+                    self.dispatch(Action::Add(name));
+                }
+            } else if close || !open || esc {
+                self.dlg_err = None;
+            } else {
+                self.dlg = Some(name);
+            }
+        }
+
+        // ── ошибка и спиннер: плавают поверх, без фоновой панели ──────────────
+        let msg = self.msg.lock().unwrap().clone();
+        if let Some(m) = &msg {
+            egui::Area::new(egui::Id::new("sv_msg"))
+                .anchor(Align2::LEFT_BOTTOM, [12.0_f32, -8.0_f32])
+                .show(ctx, |ui| {
+                    ui.colored_label(RED_X, RichText::new(m.as_str()).monospace().size(12.0));
+                });
+        }
+        if *self.loading.lock().unwrap() {
+            egui::Area::new(egui::Id::new("sv_spinner"))
+                .anchor(Align2::RIGHT_BOTTOM, [-12.0_f32, -8.0_f32])
+                .show(ctx, |ui| {
+                    ui.spinner();
+                });
+        }
+
+        // ── основной список ───────────────────────────────────────────────────
+        let expanded = self.expanded;
+        let kb_row = self.kb_row;
+        let kb_col = self.kb_col;
+        let kb_active = self.kb_active;
+        let scroll_now = self.kb_moved;
+        self.kb_moved = false;
+        let mut clicked: Option<Action> = None;
+        let mut toggle_expanded = false;
+        let mut add_clicked = false;
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            let svcs = self.svcs.lock().unwrap().clone();
-            let busy = self.busy.lock().unwrap().clone();
-
-            if svcs.is_empty() {
+            if na == 0 && ni == 0 {
                 ui.centered_and_justified(|ui| {
-                    if *self.loading.lock().unwrap() { ui.spinner(); }
-                    else {
-                        ui.label(egui::RichText::new(l.no_services).color(egui::Color32::GRAY));
-                    }
+                    ui.label(RichText::new(l.no_services).color(egui::Color32::GRAY));
                 });
                 return;
             }
 
-            let gray = egui::Color32::GRAY;
-
-            // ── фиксированные ширины правой части (прибита к правому краю) ───────
-            let gap        =  8.0_f32;
-            let w_del      =  60.0_f32;
-            let w_time     =  52.0_f32;
-            let w_cmd      =  90.0_f32;
-            let w_pid      =  52.0_f32;
-            // ширины кнопок — подогнаны под текст без лишних полей
-            let w_btn_stop = 110.0_f32;
-            let w_btn_en   = 100.0_f32;
-            let icon_w     =  24.0_f32;
-            // суммарная ширина правой части (PID+COMMAND+TIME+удалить + отступы)
-            let right_fixed = gap + w_pid + gap + w_cmd + gap + w_time + gap + w_del + gap;
-
-            // helper: рисует строку заголовка
-            let draw_row = |ui: &mut egui::Ui, row_rect: egui::Rect, is_header: bool,
-                            _label: &str, pid: &str, cmd: &str, time_s: &str| {
-                let p   = ui.painter();
-                let cy  = row_rect.center().y;
-                let r   = row_rect.right();
-                let fhdr = egui::FontId::monospace(11.0);
-                let fval = egui::FontId::monospace(13.0);
-                let (f, c_pid, c_cmd, c_time) = if is_header {
-                    (fhdr.clone(), gray, gray, gray)
-                } else {
-                    (fval.clone(),
-                     egui::Color32::from_rgb(180,120,220),
-                     egui::Color32::from_rgb(160,160,200),
-                     gray)
-                };
-                // удалить — правый край
-                let x_del_l = r - gap - w_del;
-                // TIME
-                let x_time_r = x_del_l - gap;
-                let x_time_l = x_time_r - w_time;
-                // COMMAND
-                let x_cmd_r = x_time_l - gap;
-                let x_cmd_l = x_cmd_r - w_cmd;
-                // PID
-                let x_pid_r = x_cmd_l - gap;
-
-                p.text(egui::pos2(x_pid_r,  cy), egui::Align2::RIGHT_CENTER, pid,    f.clone(), c_pid);
-                p.text(egui::pos2(x_cmd_r,  cy), egui::Align2::RIGHT_CENTER, cmd,    f.clone(), c_cmd);
-                p.text(egui::pos2(x_time_r, cy), egui::Align2::RIGHT_CENTER, time_s, f,         c_time);
-                x_del_l
-            };
-
-            // ── шапка ────────────────────────────────────────────────────────────
-            let (hdr_rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
-            draw_row(ui, hdr_rect, true, l.hdr_service, "PID", "COMMAND", "TIME");
-            // STATUS над иконкой
-            {
-                let p = ui.painter();
-                let cy = hdr_rect.center().y;
-                p.text(egui::pos2(hdr_rect.left() + 2.0, cy), egui::Align2::LEFT_CENTER,
-                    l.hdr_status, egui::FontId::monospace(11.0), gray);
-            }
-            // Рисуем "SERVICE" через child_ui
-            {
-                let left_end2 = hdr_rect.right() - right_fixed;
-                let left_rect = egui::Rect::from_min_max(
-                    egui::pos2(hdr_rect.left() + icon_w + 4.0, hdr_rect.top()),
-                    egui::pos2(left_end2, hdr_rect.bottom()));
-                let mut lui = ui.child_ui(left_rect, egui::Layout::left_to_right(egui::Align::Center));
-                let btns_w = w_btn_stop + gap + w_btn_en + gap * 2.0;
-                let name_w = (left_rect.width() - btns_w).max(60.0);
-                lui.add_sized([name_w, 20.0],
-                    egui::Label::new(egui::RichText::new(l.hdr_service).monospace().size(11.0).color(gray)));
-            }
-            ui.separator();
-
-            // ── список ───────────────────────────────────────────────────────────
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
-                for svc in &svcs {
-                    let is_busy   = busy.contains(&svc.name);
-                    let is_run    = svc.state == "run";
-                    let no_dialog = self.add_dlg.is_none();
-                    let row_h     = 28.0_f32;
-                    let avail_w   = ui.available_width();
-
-                    let (row_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(avail_w, row_h), egui::Sense::hover());
-
-                    // ── иконка ✓ / ✗ ─────────────────────────────────────────────
-                    {
-                        let p  = ui.painter();
-                        let cx = row_rect.left() + icon_w / 2.0;
-                        let cy = row_rect.center().y;
-                        let color = if is_run { egui::Color32::from_rgb(80,210,80) }
-                                    else      { egui::Color32::from_rgb(200,70,70) };
-                        let s = egui::Stroke::new(2.0, color);
-                        if is_run {
-                            p.line_segment([egui::pos2(cx-5.0, cy+1.0), egui::pos2(cx-1.0, cy+5.0)], s);
-                            p.line_segment([egui::pos2(cx-1.0, cy+5.0), egui::pos2(cx+6.0, cy-4.0)], s);
-                        } else {
-                            p.line_segment([egui::pos2(cx-4.0, cy-4.0), egui::pos2(cx+4.0, cy+4.0)], s);
-                            p.line_segment([egui::pos2(cx+4.0, cy-4.0), egui::pos2(cx-4.0, cy+4.0)], s);
-                        }
-                    }
-
-                    // ── правая часть: PID COMMAND TIME (текст через painter) ──────
-                    let pid_str  = if svc.pid != "-" && !svc.pid.is_empty() { svc.pid.as_str() } else { "" };
-                    let x_del_l  = draw_row(ui, row_rect, false, "", pid_str, &svc.command, &svc.time);
-
-                    // ── кнопка удалить ────────────────────────────────────────────
-                    {
-                        let by = row_rect.center().y - 13.0;
-                        let br = egui::Rect::from_min_size(
-                            egui::pos2(x_del_l, by), egui::vec2(w_del, 26.0));
-                        let mut del_ui = ui.child_ui(br, egui::Layout::left_to_right(egui::Align::Center));
-                        let del_btn = del_ui.add_sized([w_del, 26.0], egui::Button::new(
-                            egui::RichText::new(l.btn_remove).size(13.0)
-                                .color(egui::Color32::from_rgb(220,80,80))
-                        ).stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220,80,80))))
-                        .on_hover_text(l.hint_remove);
-                        if del_btn.clicked() && no_dialog {
-                            self.request(Action::Remove(svc.name.clone()));
-                        }
-                    }
-
-                    // ── левая часть: имя + кнопки ─────────────────────────────────
-                    let left_end2 = row_rect.right() - right_fixed;
-                    let left_rect = egui::Rect::from_min_max(
-                        egui::pos2(row_rect.left() + icon_w + 4.0, row_rect.top()),
-                        egui::pos2(left_end2, row_rect.bottom()));
-                    let mut lui = ui.child_ui(left_rect, egui::Layout::left_to_right(egui::Align::Center));
-
-                    let btns_w = w_btn_stop + gap + w_btn_en + gap * 2.0;
-                    let name_w = (left_rect.width() - btns_w).max(60.0);
-                    lui.add_sized([name_w, row_h],
-                        egui::Label::new(egui::RichText::new(&svc.name).monospace().size(13.0)));
-
-                    if is_busy {
-                        lui.spinner();
-                    } else {
-                        let (stop_label, stop_color, stop_hint) = if is_run {
-                            (l.btn_stop,  egui::Color32::from_rgb(220,80,80),  l.hint_stop)
-                        } else {
-                            (l.btn_start, egui::Color32::from_rgb(80,210,80),  l.hint_start)
-                        };
-                        let sb = lui.add_sized([w_btn_stop, 26.0], egui::Button::new(
-                            egui::RichText::new(stop_label).size(13.0).color(stop_color)
-                        ).stroke(egui::Stroke::new(1.0, stop_color))).on_hover_text(stop_hint);
-                        if sb.clicked() && no_dialog {
-                            self.request(if is_run { Action::Stop(svc.name.clone()) }
-                                         else      { Action::Start(svc.name.clone()) });
-                        }
-
-                        lui.add_space(gap);
-
-                        let (en_label, en_color, en_hint) = if svc.enabled {
-                            (l.btn_disable, egui::Color32::from_rgb(200,160,40), l.hint_disable)
-                        } else {
-                            (l.btn_enable,  egui::Color32::from_rgb(100,180,255), l.hint_enable)
-                        };
-                        let eb = lui.add_sized([w_btn_en, 26.0], egui::Button::new(
-                            egui::RichText::new(en_label).size(13.0).color(en_color)
-                        ).stroke(egui::Stroke::new(1.0, en_color))).on_hover_text(en_hint);
-                        if eb.clicked() && no_dialog {
-                            self.request(if svc.enabled { Action::Disable(svc.name.clone()) }
-                                         else           { Action::Enable(svc.name.clone()) });
-                        }
-                    }
-
+                // ── верх: /var/service ──
+                ui.add(egui::Label::new(
+                    RichText::new(l.active_hdr).monospace().size(24.0).color(egui::Color32::WHITE)));
+                header_row(ui, l);
+                ui.separator();
+                for (i, s) in data.active.iter().enumerate() {
+                    let sel = if kb_active && kb_row == i { Some(kb_col) } else { None };
+                    draw_row(ui, l, s, false, busy.contains(&s.name), sel, scroll_now, &mut clicked);
                     ui.separator();
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                // ── низ: /etc/sv (раскрывается по клику) ──
+                let arrow = if expanded { "▲" } else { "▼" };
+                let hdr = ui.add(egui::Label::new(
+                    RichText::new(format!("{}  {}", l.inactive_hdr, arrow))
+                        .monospace().size(22.0).color(Color32::WHITE))
+                    .sense(Sense::click()))
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                if hdr.clicked() {
+                    toggle_expanded = true;
+                }
+                if kb_active && kb_row == na {
+                    ui.painter().rect_stroke(
+                        hdr.rect.expand(2.0_f32), 2.0_f32,
+                        Stroke::new(1.5_f32, Color32::from_gray(190)));
+                    if scroll_now {
+                        hdr.scroll_to_me(None);
+                    }
+                }
+
+                if expanded {
+                    ui.add_space(4.0);
+                    header_row(ui, l);
+                    ui.separator();
+                    for (j, s) in data.inactive.iter().enumerate() {
+                        let row = na + 1 + j;
+                        let sel = if kb_active && kb_row == row { Some(kb_col) } else { None };
+                        draw_row(ui, l, s, true, busy.contains(&s.name), sel, scroll_now, &mut clicked);
+                        ui.separator();
+                    }
+
+                    ui.add_space(6.0);
+                    let row = total - 1;
+                    let sel = kb_active && kb_row == row;
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        let (rect, add_resp) = ui.allocate_exact_size(
+                            egui::vec2(200.0, BTN_H), Sense::hover());
+                        if sel && scroll_now {
+                            add_resp.scroll_to_me(None);
+                        }
+                        if btn_at(ui, rect, ("add", "add"), l.add_service, GREEN, l.add_hint, sel) {
+                            add_clicked = true;
+                        }
+                    });
                 }
             });
         });
+
+        if toggle_expanded {
+            self.expanded = !self.expanded;
+        }
+        if add_clicked {
+            self.dlg = Some(String::new());
+            self.dlg_err = None;
+            self.dlg_first = true;
+            self.dlg_sel = 0;
+        }
+
+        // опасные действия (удаление) сначала спрашиваем, остальные — сразу
+        let mut to_run: Option<Action> = None;
+        if let Some(a) = clicked.or(pending) {
+            // «удалить» (rm -rf) — всегда спрашиваем; «отключить» — только если сервис работает
+            let ask = match &a {
+                Action::Delete(_) => true,
+                Action::Unlink(n) => data.active.iter().any(|s| s.name == *n && s.running),
+                _ => false,
+            };
+            if ask {
+                if self.confirm.is_none() && !busy.contains(a.name()) {
+                    self.confirm = Some(a);
+                    self.confirm_sel = 0;
+                }
+            } else {
+                to_run = Some(a);
+            }
+        }
+
+        // ── окно подтверждения ────────────────────────────────────────────────
+        if let Some(a) = self.confirm.take() {
+            let (kl, kr, enter, esc) = ctx.input_mut(|i| (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            ));
+            let mut sel = self.confirm_sel;
+            if kl && sel == 1 { sel = 0; }
+            if kr && sel == 0 { sel = 1; }
+            let mut yes = false;
+            let mut no = false;
+
+            let (question, name, yes_label) = match &a {
+                Action::Unlink(n) => (l.confirm_unlink, n.clone(), l.btn_disable),
+                Action::Delete(n) => (l.confirm_delete, n.clone(), l.btn_remove),
+                _ => ("", String::new(), ""),
+            };
+
+            egui::Window::new(l.confirm_title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(RichText::new(question).size(13.0));
+                    ui.label(RichText::new(name.as_str()).monospace().size(14.0).color(RED_X));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let cancel = ui.button(RichText::new(l.dlg_cancel).size(13.0));
+                        if sel == 0 {
+                            ui.painter().rect_stroke(cancel.rect.expand(2.0_f32), 3.0_f32, Stroke::new(1.5_f32, YELLOW));
+                        }
+                        if cancel.clicked() { no = true; }
+                        let del = ui.add(egui::Button::new(RichText::new(yes_label).size(13.0).color(PUNCH)));
+                        if sel == 1 {
+                            ui.painter().rect_stroke(del.rect.expand(2.0_f32), 3.0_f32, Stroke::new(1.5_f32, YELLOW));
+                        }
+                        if del.clicked() { yes = true; }
+                    });
+                });
+
+            if enter { if sel == 1 { yes = true; } else { no = true; } }
+            if esc { no = true; }
+            self.confirm_sel = sel;
+
+            if yes {
+                to_run = Some(a);
+            } else if !no {
+                self.confirm = Some(a); // окно остаётся открытым
+            }
+        }
+
+        if let Some(a) = to_run {
+            if let Action::Favorite(ref n) = a {
+                self.toggle_favorite_now(n);
+            } else if !busy.contains(a.name()) {
+                self.dispatch(a);
+            }
+        }
     }
 }
 
@@ -777,8 +1273,8 @@ fn main() -> eframe::Result<()> {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_title(title)
-                .with_inner_size([700.0, 440.0])
-                .with_min_inner_size([480.0, 280.0]),
+                .with_inner_size([720.0_f32, 480.0_f32])
+                .with_min_inner_size([660.0_f32, 300.0_f32]),
             ..Default::default()
         },
         Box::new(|cc| Box::new(App::new(cc))),
