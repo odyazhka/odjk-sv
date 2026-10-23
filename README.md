@@ -3,7 +3,8 @@
 
 при старте выводит все сервисы, их статус, PID и время работы
 
-<img width="905" height="477" alt="изображение" src="https://github.com/user-attachments/assets/e975c280-371a-4620-8892-7c936ca40f32" />
+<img width="960" height="1048" alt="изображение" src="https://github.com/user-attachments/assets/f6d05cb7-3568-4bd8-9b9b-4d205e1f592a" />
+
 
 
 кнопка остановить/запустить делает ```sudo sv down``` /```sudo sv up```
